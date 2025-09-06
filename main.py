@@ -10,7 +10,7 @@ import json
 import re
 import logging
 from linebot.models import QuickReply, QuickReplyButton, MessageAction
-
+from google_sheets_manager import GoogleSheetsManager
 # 設定日誌
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -135,6 +135,7 @@ THERAPISTS = {
 class DatabaseManager:
     def __init__(self):
         self.db_path = 'clinic.db'
+        self.sheets_manager = GoogleSheetsManager()
         self.init_db()
     
     def init_db(self):
@@ -203,6 +204,16 @@ class DatabaseManager:
             appointment_id = cursor.lastrowid
             conn.commit()
             logger.info(f"預約已儲存，ID: {appointment_id}")
+
+            sync_success = self.sheets_manager.sync_appointment_to_sheets(
+                appointment_data, 
+                appointment_id, 
+                THERAPISTS, 
+                TREATMENT_ROOMS
+            )
+            if sync_success:
+                logger.info(f"預約 #{appointment_id} 已同步到Google Sheets")
+
             return appointment_id
         except Exception as e:
             logger.error(f"儲存預約失敗: {e}")
@@ -248,6 +259,8 @@ class DatabaseManager:
                 ''', (appointment_id, user_id))
             
             conn.commit()
+            self.sheets_manager.update_appointment_status_in_sheets(appointment_id, 'cancelled')
+            
             return True, "預約已成功取消"
             
         except Exception as e:
@@ -350,7 +363,10 @@ class AdminManager:
             QuickReplyButton(action=MessageAction(label="查看所有預約", text="管理員-查看所有預約")),
             QuickReplyButton(action=MessageAction(label="新增預約", text="管理員-新增預約")),
             QuickReplyButton(action=MessageAction(label="治療師排班", text="管理員-治療師排班")),
+            QuickReplyButton(action=MessageAction(label="離開管理模式", text="離開管理模式")),
+            QuickReplyButton(action=MessageAction(label="查看雲端表格", text="管理員-查看雲端表格")),
             QuickReplyButton(action=MessageAction(label="離開管理模式", text="離開管理模式"))
+   
         ])
         return quick_reply
     
@@ -674,6 +690,12 @@ class AIAssistant:
                 user_states[user_id]['admin_mode'] = False
                 user_states[user_id]['stage'] = 'chat'
             return TextSendMessage(text="已離開管理員模式。")
+
+        elif message == "管理員-查看雲端表格":
+            # 提供Google Sheets連結
+            sheets_url = f"https://docs.google.com/spreadsheets/d/{self.db.sheets_manager.spreadsheet_id}/edit"
+            return TextSendMessage(text=f"Google Sheets 預約記錄表：\n{sheets_url}\n\n您可以在雲端表格中查看所有預約的詳細資料。")
+    
         
         return None
 
@@ -750,7 +772,10 @@ def create_admin_menu(self):
         QuickReplyButton(action=MessageAction(label="已取消預約", text="管理員-查看已取消預約")),
         QuickReplyButton(action=MessageAction(label="新增預約", text="管理員-新增預約")),
         QuickReplyButton(action=MessageAction(label="治療師排班", text="管理員-治療師排班")),
+        QuickReplyButton(action=MessageAction(label="離開管理模式", text="離開管理模式")),
+        QuickReplyButton(action=MessageAction(label="查看雲端表格", text="管理員-查看雲端表格")),
         QuickReplyButton(action=MessageAction(label="離開管理模式", text="離開管理模式"))
+   
     ])
     return quick_reply
 
