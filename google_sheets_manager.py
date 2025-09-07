@@ -9,12 +9,16 @@ import gspread
 logger = logging.getLogger(__name__)
 
 class GoogleSheetsManager:
-    def __init__(self, spreadsheet_id='1suA1DLkjpzIuVwjTmbdmIxbt0XJYJHhx3SQkOXH09JQ', worksheet_name='sheet1'):
+    def __init__(self, spreadsheet_id='1suA1DLkjpzIuVwjTmbdmIxbt0XJYJHhx3SQkOXH09JQ'):
         self.credentials = None
         self.client = None
         self.spreadsheet_id = spreadsheet_id
-        self.worksheet_name = worksheet_name
         self.init_google_sheets()
+    
+    def get_current_worksheet_name(self):
+        """獲取當前月份的工作表名稱"""
+        now = datetime.now()
+        return f"{now.year}-{now.month:02d}"  # 格式: 2025-01, 2025-02
     
     def init_google_sheets(self):
         """初始化Google Sheets連接"""
@@ -27,7 +31,7 @@ class GoogleSheetsManager:
                     scopes=['https://www.googleapis.com/auth/spreadsheets']
                 )
             
-            # 方法2: 使用JSON文件
+            # 方法2: 使用JSON檔案
             elif os.path.exists('service_account.json'):
                 self.credentials = Credentials.from_service_account_file(
                     'service_account.json',
@@ -46,6 +50,42 @@ class GoogleSheetsManager:
             logger.error(f"Google Sheets 初始化失敗: {e}")
             return False
     
+    def ensure_monthly_worksheet_exists(self):
+        """確保當前月份的工作表存在"""
+        if not self.client:
+            return None
+        
+        try:
+            spreadsheet = self.client.open_by_key(self.spreadsheet_id)
+            current_worksheet_name = self.get_current_worksheet_name()
+            
+            # 嘗試獲取當前月份的工作表
+            try:
+                worksheet = spreadsheet.worksheet(current_worksheet_name)
+                logger.info(f"找到現有工作表: {current_worksheet_name}")
+                return worksheet
+            except gspread.WorksheetNotFound:
+                # 工作表不存在，建立新的
+                logger.info(f"建立新的月份工作表: {current_worksheet_name}")
+                worksheet = spreadsheet.add_worksheet(
+                    title=current_worksheet_name, 
+                    rows=1000, 
+                    cols=15
+                )
+                
+                # 添加標題行
+                headers = [
+                    '預約編號', '日期', '星期', '時間', '姓名', '電話', 
+                    '治療師', '房間', '費用', '備註', '狀態', '建立時間', '建立者', '修改時間', '症狀/診斷'
+                ]
+                worksheet.append_row(headers)
+                logger.info(f"已建立新工作表 {current_worksheet_name} 並添加標題行")
+                return worksheet
+                
+        except Exception as e:
+            logger.error(f"確保月份工作表存在時發生錯誤: {e}")
+            return None
+    
     def sync_appointment_to_sheets(self, appointment_data, appointment_id, therapists_config, rooms_config):
         """將預約資料同步到Google Sheets"""
         if not self.client:
@@ -53,9 +93,11 @@ class GoogleSheetsManager:
             return False
         
         try:
-            # 打開工作表
-            spreadsheet = self.client.open_by_key(self.spreadsheet_id)
-            worksheet = spreadsheet.worksheet(self.worksheet_name)
+            # 確保當前月份的工作表存在
+            worksheet = self.ensure_monthly_worksheet_exists()
+            if not worksheet:
+                logger.error("無法獲取或建立工作表")
+                return False
             
             # 格式化資料
             date_obj = datetime.strptime(appointment_data['date'], '%Y-%m-%d')
@@ -80,25 +122,14 @@ class GoogleSheetsManager:
                 appointment_data.get('notes', ''),  # 備註
                 'confirmed',  # 狀態
                 datetime.now().strftime('%Y/%m/%d %H:%M:%S'),  # 建立時間
-                appointment_data.get('created_by', 'patient')  # 建立者
+                appointment_data.get('created_by', 'patient'),  # 建立者
+                '',  # 修改時間（預留）
+                appointment_data.get('notes', '')  # 症狀/診斷（複製備註內容）
             ]
-            
-            # 如果工作表為空，先添加標題行
-            try:
-                existing_headers = worksheet.row_values(1)
-                if not existing_headers:
-                    raise Exception("需要添加標題行")
-            except:
-                headers = [
-                    '預約編號', '日期', '星期', '時間', '姓名', '電話', 
-                    '治療師', '房間', '費用', '備註', '狀態', '建立時間', '建立者'
-                ]
-                worksheet.append_row(headers)
-                logger.info("已添加Google Sheets標題行")
             
             # 添加預約資料
             worksheet.append_row(row_data)
-            logger.info(f"預約 #{appointment_id} 已同步到Google Sheets")
+            logger.info(f"預約 #{appointment_id} 已同步到Google Sheets工作表 {worksheet.title}")
             return True
             
         except Exception as e:
@@ -111,8 +142,10 @@ class GoogleSheetsManager:
             return False
         
         try:
-            spreadsheet = self.client.open_by_key(self.spreadsheet_id)
-            worksheet = spreadsheet.worksheet(self.worksheet_name)
+            # 取得目前月份的工作表
+            worksheet = self.ensure_monthly_worksheet_exists()
+            if not worksheet:
+                return False
             
             # 找到對應的預約記錄
             all_records = worksheet.get_all_records()
@@ -129,25 +162,107 @@ class GoogleSheetsManager:
                     logger.info(f"Google Sheets中預約 #{appointment_id} 狀態已更新為 {new_status}")
                     return True
             
-            logger.warning(f"在Google Sheets中找不到預約 #{appointment_id}")
-            return False
+            # 如果在目前月份找不到，嘗試搜尋其他月份（可選）
+            logger.warning(f"在目前月份工作表中找不到預約 #{appointment_id}")
+            return self._search_and_update_in_other_months(appointment_id, new_status)
             
         except Exception as e:
             logger.error(f"更新Google Sheets狀態失敗: {e}")
             return False
     
-    def get_all_appointments_from_sheets(self):
-        """從Google Sheets獲取所有預約記錄"""
+    def _search_and_update_in_other_months(self, appointment_id, new_status):
+        """在其他月份的工作表中搜尋並更新預約狀態"""
+        try:
+            spreadsheet = self.client.open_by_key(self.spreadsheet_id)
+            worksheets = spreadsheet.worksheets()
+            
+            for worksheet in worksheets:
+                # 跳過非月份格式的工作表
+                if not self._is_monthly_worksheet(worksheet.title):
+                    continue
+                
+                try:
+                    all_records = worksheet.get_all_records()
+                    for i, record in enumerate(all_records, start=2):
+                        if str(record.get('預約編號', '')) == str(appointment_id):
+                            worksheet.update_cell(i, 11, new_status)
+                            try:
+                                worksheet.update_cell(i, 14, datetime.now().strftime('%Y/%m/%d %H:%M:%S'))
+                            except:
+                                pass
+                            logger.info(f"在工作表 {worksheet.title} 中找到並更新預約 #{appointment_id}")
+                            return True
+                except Exception as e:
+                    logger.warning(f"搜尋工作表 {worksheet.title} 時出錯: {e}")
+                    continue
+            
+            logger.warning(f"在所有工作表中都找不到預約 #{appointment_id}")
+            return False
+            
+        except Exception as e:
+            logger.error(f"搜尋其他月份工作表時出錯: {e}")
+            return False
+    
+    def _is_monthly_worksheet(self, worksheet_name):
+        """檢查工作表名稱是否符合月份格式 (YYYY-MM)"""
+        try:
+            parts = worksheet_name.split('-')
+            if len(parts) == 2:
+                year = int(parts[0])
+                month = int(parts[1])
+                return 2020 <= year <= 2030 and 1 <= month <= 12
+        except:
+            pass
+        return False
+    
+    def get_all_appointments_from_sheets(self, month_filter=None):
+        """從Google Sheets取得所有預約記錄"""
         if not self.client:
             return []
         
         try:
             spreadsheet = self.client.open_by_key(self.spreadsheet_id)
-            worksheet = spreadsheet.worksheet(self.worksheet_name)
+            all_appointments = []
             
-            all_records = worksheet.get_all_records()
-            return all_records
+            if month_filter:
+                # 取得指定月份的記錄
+                try:
+                    worksheet = spreadsheet.worksheet(month_filter)
+                    records = worksheet.get_all_records()
+                    all_appointments.extend(records)
+                except gspread.WorksheetNotFound:
+                    logger.warning(f"找不到月份工作表: {month_filter}")
+            else:
+                # 取得目前月份的記錄
+                worksheet = self.ensure_monthly_worksheet_exists()
+                if worksheet:
+                    records = worksheet.get_all_records()
+                    all_appointments.extend(records)
+            
+            return all_appointments
             
         except Exception as e:
             logger.error(f"從Google Sheets讀取資料失敗: {e}")
+            return []
+    
+    def get_available_months(self):
+        """取得所有可用的月份工作表"""
+        if not self.client:
+            return []
+        
+        try:
+            spreadsheet = self.client.open_by_key(self.spreadsheet_id)
+            worksheets = spreadsheet.worksheets()
+            
+            months = []
+            for worksheet in worksheets:
+                if self._is_monthly_worksheet(worksheet.title):
+                    months.append(worksheet.title)
+            
+            # 按時間順序排序
+            months.sort(reverse=True)  # 最新的在前面
+            return months
+            
+        except Exception as e:
+            logger.error(f"取得可用月份失敗: {e}")
             return []

@@ -294,7 +294,14 @@ class DatabaseManager:
             return []
         finally:
             conn.close()
+    def get_appointments_from_sheets_by_month(self, month=None):
+        """從 Google Sheets 取得指定月份的預約記錄"""
+        return self.sheets_manager.get_all_appointments_from_sheets(month_filter=month)
     
+    def get_available_months_from_sheets(self):
+        """取得所有可用的月份工作表"""
+        return self.sheets_manager.get_available_months()
+
     def get_all_appointments(self, status=None, date_filter=None, limit=50):
         """獲取所有預約 - 管理員功能"""
         try:
@@ -361,9 +368,10 @@ class AdminManager:
         quick_reply = QuickReply(items=[
             QuickReplyButton(action=MessageAction(label="查看今日預約", text="管理員-查看今日預約")),
             QuickReplyButton(action=MessageAction(label="查看所有預約", text="管理員-查看所有預約")),
+            QuickReplyButton(action=MessageAction(label="查看本月預約", text="管理員-查看本月預約")),
+            QuickReplyButton(action=MessageAction(label="查看歷史月份", text="管理員-查看歷史月份")),
             QuickReplyButton(action=MessageAction(label="新增預約", text="管理員-新增預約")),
             QuickReplyButton(action=MessageAction(label="治療師排班", text="管理員-治療師排班")),
-            QuickReplyButton(action=MessageAction(label="離開管理模式", text="離開管理模式")),
             QuickReplyButton(action=MessageAction(label="查看雲端表格", text="管理員-查看雲端表格")),
             QuickReplyButton(action=MessageAction(label="離開管理模式", text="離開管理模式"))
    
@@ -626,14 +634,69 @@ class AIAssistant:
         quick_reply = create_faq_quick_reply()
         return TextSendMessage(text=fallback_text, quick_reply=quick_reply)
     
+    def show_available_months(self):
+        """顯示可用的月份選項"""
+        months = self.db.sheets_manager.get_available_months()
+        
+        if not months:
+            return TextSendMessage(text="目前沒有歷史記錄。")
+        
+        quick_reply_items = []
+        for month in months[:10]:  # 最多顯示10個月份
+            # 格式化月份顯示
+            year, month_num = month.split('-')
+            display_text = f"{year}年{int(month_num)}月"
+            
+            quick_reply_items.append(
+                QuickReplyButton(
+                    action=MessageAction(
+                        label=display_text,
+                        text=f"查看月份_{month}"
+                    )
+                )
+            )
+        
+        quick_reply_items.append(
+            QuickReplyButton(action=MessageAction(label="返回管理員模式", text="管理員模式"))
+        )
+        
+        quick_reply = QuickReply(items=quick_reply_items)
+        return TextSendMessage(
+            text="請選擇要查看的月份：",
+            quick_reply=quick_reply
+        )
+
+    def get_current_month_appointments(self):
+        """取得本月預約"""
+        return self.db.sheets_manager.get_all_appointments_from_sheets()
+
+    def get_month_appointments(self, month):
+        """取得指定月份的預約"""
+        return self.db.sheets_manager.get_all_appointments_from_sheets(month_filter=month)
+
     def handle_admin_commands(self, message, user_id):
-        """處理管理員指令 - 修正版"""
+        """處理管理員指令 - 增加月份查看功能"""
         if message == "管理員模式" or message == "admin":
             quick_reply = self.admin_manager.create_admin_menu()
             return TextSendMessage(
                 text="歡迎進入管理員模式！請選擇要執行的操作：",
                 quick_reply=quick_reply
             )
+    
+        elif message == "管理員-查看本月預約":
+            # 查看當前月份的預約
+            appointments = self.get_current_month_appointments()
+            return self.admin_manager.create_appointments_flex(appointments, "本月預約")
+        
+        elif message == "管理員-查看歷史月份":
+            # 顯示可用的歷史月份
+            return self.show_available_months()
+        
+        elif message.startswith("查看月份_"):
+            # 查看指定月份的預約
+            month = message.replace("查看月份_", "")
+            appointments = self.get_month_appointments(month)
+            return self.admin_manager.create_appointments_flex(appointments, f"{month}月預約")
     
         elif message == "管理員-查看今日預約":
             appointments = self.admin_manager.get_today_appointments()
@@ -753,17 +816,25 @@ class AIAssistant:
         return TextSendMessage(text=schedule_text)
     
     def get_rule_based_response(self, message):
-        """基於規則的回應系統"""
-        # 問候 - 這裡是重點修正
-        if any(word in message.lower() for word in ['你好', '您好', 'hi', 'hello', 'hey']):
-            return "您好，歡迎來到物理治療診所！我可以為您介紹我們的服務、收費或協助預約。請問有什麼需要幫助的嗎？"
+        """基於規則的回應系統 - 修正版"""
+        # 問候語 - 更親切的回應
+        if any(word in message.lower() for word in ['你好', '您好', 'hi', 'hello', 'hey', '哈囉']):
+            return "您好！很高興為您服務 我是診所的預約助理，可以協助您預約治療、了解服務項目和收費標準。請問今天有什麼可以幫助您的嗎？"
+        
+        # 感謝回應
+        if any(word in message for word in ['謝謝', '感謝', '辛苦了', '感謝你', '感謝妳', '謝謝你', '謝謝妳']):
+            return "不客氣！很開心能幫助到您 如果還有其他問題或需要預約，隨時都可以告訴我喔～"
         
         # 保險相關
         if '保險' in message:
-            return "關於保險理賠：我們是全自費醫療，沒有配合健保。申請理賠需要醫生開立的診斷證明，我們會開立收據。大部分保險公司不給付，部分保險公司會給付六七成，詳細規定請您和保險業務員確認。"
+            return "關於保險理賠的部分，我為您說明一下：我們診所是全自費醫療，沒有配合健保。如果您要申請保險理賠，需要醫生開立的診斷證明，我們會提供收據給您。不過大部分保險公司不給付物理治療，也有部分保險公司會給付六到七成，建議您先和保險業務員確認您的保單條款喔！"
+        
+        # 一般對話回應
+        if any(word in message for word in ['好的', '了解', '知道了', 'ok', 'OK']):
+            return "好的！還有什麼其他問題嗎？我很樂意為您解答～"
         
         return None
-    
+   
     def get_fallback_response(self, message):
         """備用回應"""
         return "感謝您的詢問。我可以為您介紹診所的服務項目、收費標準、預約流程等。如果您想預約治療，請告訴我您的需求，我會為您安排合適的時間。如有其他問題，也歡迎隨時詢問。"
@@ -1087,7 +1158,7 @@ def create_preference_based_slots_flex(slots, user_id):
                     "action": {
                         "type": "postback",
                         "label": "預約此時段",
-                        "data": f"action=select_preferred_slot&therapist_id={slot['therapist_id']}&date={slot['date']}&time={slot['time']}"
+                        "data": f"action=direct_confirm&therapist_id={slot['therapist_id']}&date={slot['date']}&time={slot['time']}"
                     },
                     "style": "primary",
                     "height": "sm",
@@ -1147,12 +1218,15 @@ def create_preference_based_slots_flex(slots, user_id):
     
     return flex_message
 
+
 # 修正管理員選單，增加更多選項
 def create_admin_menu(self):
     """建立管理員選單 - 增強版"""
     quick_reply = QuickReply(items=[
         QuickReplyButton(action=MessageAction(label="查看今日預約", text="管理員-查看今日預約")),
         QuickReplyButton(action=MessageAction(label="查看所有預約", text="管理員-查看所有預約")),
+        QuickReplyButton(action=MessageAction(label="查看本月預約", text="管理員-查看本月預約")),
+        QuickReplyButton(action=MessageAction(label="查看歷史月份", text="管理員-查看歷史月份")),
         QuickReplyButton(action=MessageAction(label="已確認預約", text="管理員-查看已確認預約")),
         QuickReplyButton(action=MessageAction(label="已取消預約", text="管理員-查看已取消預約")),
         QuickReplyButton(action=MessageAction(label="新增預約", text="管理員-新增預約")),
@@ -1163,6 +1237,33 @@ def create_admin_menu(self):
    
     ])
     return quick_reply
+
+def handle_appointment_notes(user_id, user_message):
+    """處理預約備註"""
+    # 儲存備註
+    user_states[user_id]['appointment_notes'] = user_message if user_message != '無' else ''
+    user_states[user_id]['stage'] = 'appointment_confirm'
+    
+    # 顯示完整預約資訊，包含備註
+    appointment_data = user_states[user_id]['final_appointment_data']
+    therapist_info = THERAPISTS[appointment_data['therapist_id']]
+    room_info = TREATMENT_ROOMS[appointment_data['room_id']]
+    
+    date_obj = datetime.strptime(appointment_data['date'], '%Y-%m-%d')
+    formatted_date = date_obj.strftime('%m月%d日')
+    weekday = ['週一', '週二', '週三', '週四', '週五', '週六', '週日'][date_obj.weekday()]
+    
+    notes_text = f"\n備註：{user_message}" if user_message != '無' else ""
+    
+    return TextSendMessage(text=f"預約資訊確認：\n\n" \
+           f"日期：{formatted_date}({weekday})\n" \
+           f"時間：{appointment_data['time']}\n" \
+           f"治療師：{therapist_info['name']}\n" \
+           f"房間：{room_info['name']}\n" \
+           f"費用：{therapist_info['fee']}元{notes_text}\n\n" \
+           f"請提供您的姓名和聯絡電話以完成預約。\n" \
+           f"格式：姓名 電話\n" \
+           f"例如：王小明 0912345678")
 
 # 修正今日預約查詢邏輯
 def get_today_appointments(self):
@@ -1448,68 +1549,9 @@ def show_available_therapists_for_datetime(user_id):
     if not available_therapists:
         return TextSendMessage(text="很抱歉，該時段沒有符合您偏好的可用治療師，請選擇其他時間。")
     
-    # 建立治療師選擇的Flex Message
-    return create_therapist_selection_flex_for_datetime(available_therapists, selected_date, selected_time)
-
-def create_therapist_selection_flex_for_datetime(therapists, date_str, time_str):
-    """為具體日期時間建立治療師選擇Flex Message - 修正佈局版"""
-    if not therapists:
-        return None
-    
-    contents = []
-    
-    for therapist in therapists:
-        content = {
-            "type": "box",
-            "layout": "vertical",
-            "contents": [
-                {
-                    "type": "text",
-                    "text": f"{therapist['therapist_name']}",
-                    "size": "md",
-                    "weight": "bold",
-                    "color": "#333333"
-                },
-                {
-                    "type": "text",
-                    "text": f"({therapist['therapist_gender']}性治療師) ${therapist['fee']}",
-                    "size": "sm",
-                    "color": "#666666",
-                    "margin": "sm"
-                },
-                {
-                    "type": "button",
-                    "action": {
-                        "type": "postback",
-                        "label": "選擇此治療師",
-                        "data": f"action=select_preferred_slot&therapist_id={therapist['therapist_id']}&date={therapist['date']}&time={therapist['time']}"
-                    },
-                    "style": "primary",
-                    "height": "sm",
-                    "margin": "md"
-                }
-            ],
-            "spacing": "sm",
-            "paddingAll": "lg",
-            "backgroundColor": "#F8F9FA",
-            "cornerRadius": "md"
-        }
-        
-        contents.append(content)
-        
-        # 添加分隔線
-        if therapist != therapists[-1]:
-            contents.append({
-                "type": "separator",
-                "margin": "lg"
-            })
-    
-    # 格式化日期時間顯示
-    date_obj = datetime.strptime(date_str, '%Y-%m-%d')
-    formatted_date = date_obj.strftime('%m月%d日')
-    weekday = ['週一', '週二', '週三', '週四', '週五', '週六', '週日'][date_obj.weekday()]
-    
-    hour = int(time_str.split(':')[0])
+    # 使用現有的 create_therapist_selection_flex_new 函數
+    # 格式化時間描述
+    hour = int(selected_time.split(':')[0])
     if hour < 12:
         time_period = "早上"
     elif hour < 18:
@@ -1517,43 +1559,154 @@ def create_therapist_selection_flex_for_datetime(therapists, date_str, time_str)
     else:
         time_period = "晚上"
     
-    flex_message = FlexSendMessage(
-        alt_text="選擇治療師",
-        contents={
-            "type": "bubble",
-            "header": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": f"{formatted_date}({weekday}) {time_period} {time_str}",
-                        "weight": "bold",
-                        "size": "lg",
-                        "color": "#ffffff"
-                    },
-                    {
-                        "type": "text",
-                        "text": "請選擇您偏好的治療師",
-                        "size": "sm",
-                        "color": "#ffffff",
-                        "margin": "sm"
-                    }
-                ],
-                "backgroundColor": "#27ACB2",
-                "paddingAll": "lg"
-            },
-            "body": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": contents,
-                "spacing": "none",
-                "paddingAll": "lg"
-            }
-        }
+    # 將資料格式轉換為 create_therapist_selection_flex_new 需要的格式
+    therapists_for_flex = []
+    for therapist in available_therapists:
+        therapists_for_flex.append({
+            'id': therapist['therapist_id'],
+            'name': therapist['therapist_name'],
+            'gender': therapist['therapist_gender'],
+            'fee': therapist['fee'],
+            'time': therapist['time']
+        })
+    
+    # 使用現有的 Flex Message 建立函數
+    flex_message = create_therapist_selection_flex_new(
+        therapists_for_flex, 
+        selected_date, 
+        f"{time_period} {selected_time}"
     )
     
-    return flex_message
+    if flex_message:
+        return flex_message
+    else:
+        # 備用方案：使用 Quick Reply
+        quick_reply_items = []
+        for therapist in available_therapists:
+            quick_reply_items.append(
+                QuickReplyButton(
+                    action=MessageAction(
+                        label=f"{therapist['therapist_name']} ({therapist['therapist_gender']}性) ${therapist['fee']}",
+                        text=f"選擇治療師_{therapist['therapist_id']}_{selected_date}_{therapist['time']}"
+                    )
+                )
+            )
+        
+        if len(quick_reply_items) > 13:  # LINE Quick Reply 最多 13 個按鈕
+            quick_reply_items = quick_reply_items[:12]
+            quick_reply_items.append(
+                QuickReplyButton(action=MessageAction(label="更多選項", text="查看更多治療師"))
+            )
+        
+        quick_reply = QuickReply(items=quick_reply_items)
+        return TextSendMessage(
+            text=f"請選擇治療師（{selected_date} {time_period} {selected_time}）：",
+            quick_reply=quick_reply
+        )
+
+# def create_therapist_selection_flex_for_datetime(therapists, date_str, time_str):
+#     """為具體日期時間建立治療師選擇Flex Message - 修正佈局版"""
+#     if not therapists:
+#         return None
+    
+#     contents = []
+    
+#     for therapist in therapists:
+#         content = {
+#             "type": "box",
+#             "layout": "vertical",
+#             "contents": [
+#                 {
+#                     "type": "text",
+#                     "text": f"{therapist['therapist_name']}",
+#                     "size": "md",
+#                     "weight": "bold",
+#                     "color": "#333333"
+#                 },
+#                 {
+#                     "type": "text",
+#                     "text": f"({therapist['therapist_gender']}性治療師) ${therapist['fee']}",
+#                     "size": "sm",
+#                     "color": "#666666",
+#                     "margin": "sm"
+#                 },
+#                 {
+#                     "type": "button",
+#                     "action": {
+#                         "type": "postback",
+#                         "label": "選擇此治療師",
+#                         "data": f"action=select_preferred_slot&therapist_id={therapist['therapist_id']}&date={therapist['date']}&time={therapist['time']}"
+#                     },
+#                     "style": "primary",
+#                     "height": "sm",
+#                     "margin": "md"
+#                 }
+#             ],
+#             "spacing": "sm",
+#             "paddingAll": "lg",
+#             "backgroundColor": "#F8F9FA",
+#             "cornerRadius": "md"
+#         }
+        
+#         contents.append(content)
+        
+#         # 添加分隔線
+#         if therapist != therapists[-1]:
+#             contents.append({
+#                 "type": "separator",
+#                 "margin": "lg"
+#             })
+    
+#     # 格式化日期時間顯示
+#     date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+#     formatted_date = date_obj.strftime('%m月%d日')
+#     weekday = ['週一', '週二', '週三', '週四', '週五', '週六', '週日'][date_obj.weekday()]
+    
+#     hour = int(time_str.split(':')[0])
+#     if hour < 12:
+#         time_period = "早上"
+#     elif hour < 18:
+#         time_period = "下午"
+#     else:
+#         time_period = "晚上"
+    
+#     flex_message = FlexSendMessage(
+#         alt_text="選擇治療師",
+#         contents={
+#             "type": "bubble",
+#             "header": {
+#                 "type": "box",
+#                 "layout": "vertical",
+#                 "contents": [
+#                     {
+#                         "type": "text",
+#                         "text": f"{formatted_date}({weekday}) {time_period} {time_str}",
+#                         "weight": "bold",
+#                         "size": "lg",
+#                         "color": "#ffffff"
+#                     },
+#                     {
+#                         "type": "text",
+#                         "text": "請選擇您偏好的治療師",
+#                         "size": "sm",
+#                         "color": "#ffffff",
+#                         "margin": "sm"
+#                     }
+#                 ],
+#                 "backgroundColor": "#27ACB2",
+#                 "paddingAll": "lg"
+#             },
+#             "body": {
+#                 "type": "box",
+#                 "layout": "vertical",
+#                 "contents": contents,
+#                 "spacing": "none",
+#                 "paddingAll": "lg"
+#             }
+#         }
+#     )
+    
+#     return flex_message
 
 
 @handler.add(MessageEvent, message=TextMessage)
@@ -1602,7 +1755,9 @@ def handle_message(event):
         
         elif current_stage == 'select_specific_therapist':
             reply_message = handle_specific_therapist_selection(user_id, user_message)
-        
+
+        elif current_stage == 'appointment_notes':
+            reply_message = handle_appointment_notes(user_id, user_message)
         # 3. 處理舊有的時間和日期選擇流程（保持向後兼容）
         elif current_stage == 'select_time':
             if user_message.startswith('選擇時間_'):
@@ -1679,51 +1834,67 @@ def handle_message(event):
                 reply_message = show_available_therapists_for_datetime(user_id)
             else:
                 reply_message = TextSendMessage(text="請選擇有效的時間選項，或輸入「取消」回到主選單。")
-        # 4. 處理房間選擇
-        elif user_message.startswith('選擇房間_'):
-            parts = user_message.replace('選擇房間_', '').split('_')
-            if len(parts) >= 4:
-                room_id = parts[0]
-                therapist_id = parts[1]
-                date = parts[2]
-                time = parts[3]
+
+        elif user_message.startswith('選擇治療師_'):
+            parts = user_message.replace('選擇治療師_', '').split('_')
+            if len(parts) >= 3:
+                therapist_id = parts[0]
+                date = parts[1]
+                time = parts[2]
                 
-                therapist_info = THERAPISTS[therapist_id]
-                room_info = TREATMENT_ROOMS[room_id]
-                
-                user_states[user_id]['final_appointment_data'] = {
-                    'therapist_id': therapist_id,
-                    'room_id': room_id,
-                    'date': date,
-                    'time': time
-                }
-                user_states[user_id]['stage'] = 'appointment_confirm'
-                
-                date_obj = datetime.strptime(date, '%Y-%m-%d')
-                formatted_date = date_obj.strftime('%m月%d日')
-                weekday = ['週一', '週二', '週三', '週四', '週五', '週六', '週日'][date_obj.weekday()]
-                
-                reply_message = TextSendMessage(text=f"您的預約資訊：\n\n" \
-                       f"日期：{formatted_date}({weekday})\n" \
-                       f"時間：{time}\n" \
-                       f"治療師：{therapist_info['name']}\n" \
-                       f"房間：{room_info['name']}\n" \
-                       f"費用：{therapist_info['fee']}元\n\n" \
-                       f"請提供您的姓名和聯絡電話以完成預約。\n" \
-                       f"格式：姓名 電話\n" \
-                       f"例如：王小明 0912345678")
+                # 自動分配可用房間
+                available_rooms = get_available_rooms(date, time)
+                if not available_rooms:
+                    reply_message = TextSendMessage(text="很抱歉，該時段沒有可用房間，請選擇其他時間。")
+                else:
+                    # 自動選擇第一個可用房間
+                    selected_room = available_rooms[0]
+                    
+                    # 組合最終預約資料
+                    therapist_info = THERAPISTS[therapist_id]
+                    room_info = TREATMENT_ROOMS[selected_room]
+                    
+                    user_states[user_id]['final_appointment_data'] = {
+                        'therapist_id': therapist_id,
+                        'room_id': selected_room,
+                        'date': date,
+                        'time': time
+                    }
+                    user_states[user_id]['stage'] = 'appointment_notes'  # 進入備註階段
+                    
+                    date_obj = datetime.strptime(date, '%Y-%m-%d')
+                    formatted_date = date_obj.strftime('%m月%d日')
+                    weekday = ['週一', '週二', '週三', '週四', '週五', '週六', '週日'][date_obj.weekday()]
+                    
+                    reply_message = TextSendMessage(text=f"您的預約資訊：\n\n" \
+                        f"日期：{formatted_date}({weekday})\n" \
+                        f"時間：{time}\n" \
+                        f"治療師：{therapist_info['name']}\n" \
+                        f"房間：{room_info['name']}\n" \
+                        f"費用：{therapist_info['fee']}元\n\n" \
+                        f"請問您有什麼症狀或特別需要注意的地方嗎？\n" \
+                        f"（可以簡單描述，例如：腰痛、肩膀僵硬等，如果沒有特別症狀請輸入「無」）")
+            else:
+                reply_message = TextSendMessage(text="選擇格式錯誤，請重新選擇治療師。")
 
         # 5. 處理管理員指令
         elif ai_assistant.admin_manager.is_admin(user_id) and (
             user_message.startswith('管理員') or 
             user_message == 'admin' or
-            user_message in ['管理員模式', '離開管理模式']
+            user_message in ['管理員模式', '離開管理模式'] or
+            user_message.startswith('查看月份_')
         ):
             admin_response = ai_assistant.handle_admin_commands(user_message, user_id)
             if admin_response:
                 reply_message = admin_response
             else:
                 reply_message = TextSendMessage(text="無效的管理員指令。")
+
+        elif user_message.startswith('查看月份_'):
+            # 查看指定月份的預約
+            month = user_message.replace('查看月份_', '')
+            appointments = ai_assistant.get_month_appointments(month)
+            reply_message = ai_assistant.admin_manager.create_appointments_flex(appointments, f"{month}月預約")
 
         # 6. 處理管理員模式的預約流程
         elif user_states[user_id].get('admin_mode', False):
@@ -1735,6 +1906,8 @@ def handle_message(event):
                 reply_message = handle_admin_therapist_selection(user_id, user_message)
             elif current_stage == 'admin_select_room' and user_message.startswith('管理員選擇房間_'):
                 reply_message = handle_admin_room_selection(user_id, user_message)
+            elif current_stage == 'admin_appointment_notes':  
+                reply_message = handle_admin_appointment_notes(user_id, user_message)
             elif current_stage == 'appointment_confirm':
                 appointment_data = user_states[user_id].get('final_appointment_data')
                 if appointment_data:
@@ -2022,7 +2195,7 @@ def create_therapist_selection_flex_new(therapists, date_str, time_description):
                         "action": {
                             "type": "postback",
                             "label": "選擇此治療師",
-                            "data": f"action=select_therapist&therapist_id={therapist['id']}&date={date_str}&time={therapist['time']}"
+                            "data": f"action=direct_confirm&therapist_id={therapist['id']}&date={date_str}&time={therapist['time']}"
                         },
                         "style": "primary",
                         "height": "sm",
@@ -2234,140 +2407,140 @@ def get_therapists_by_time_period(time_period, date_str):
         return []
 
 
-def create_room_selection_flex(therapist_data):
-    """建立治療室選擇的Flex Message"""
-    logger.info(f"建立房間選擇 Flex Message - 治療師: {therapist_data.get('therapist_id')}")
+# def create_room_selection_flex(therapist_data):
+#     """建立治療室選擇的Flex Message"""
+#     logger.info(f"建立房間選擇 Flex Message - 治療師: {therapist_data.get('therapist_id')}")
     
-    # 獲取可用房間
-    available_rooms = get_available_rooms(therapist_data['date'], therapist_data['time'])
+#     # 獲取可用房間
+#     available_rooms = get_available_rooms(therapist_data['date'], therapist_data['time'])
     
-    if not available_rooms:
-        logger.warning("沒有可用房間")
-        return None
+#     if not available_rooms:
+#         logger.warning("沒有可用房間")
+#         return None
     
-    contents = []
-    for room_id in available_rooms:
-        room_info = TREATMENT_ROOMS[room_id]
+#     contents = []
+#     for room_id in available_rooms:
+#         room_info = TREATMENT_ROOMS[room_id]
         
-        # 房間特色描述
-        features = []
-        if not room_info['has_camera']:
-            features.append("無監視器")
-        if room_info['type'] == '粉紅':
-            features.append("粉紅色系")
-        elif room_info['type'] == '藍色':
-            features.append("藍色系")
+#         # 房間特色描述
+#         features = []
+#         if not room_info['has_camera']:
+#             features.append("無監視器")
+#         if room_info['type'] == '粉紅':
+#             features.append("粉紅色系")
+#         elif room_info['type'] == '藍色':
+#             features.append("藍色系")
         
-        feature_text = "、".join(features) if features else "一般房間"
+#         feature_text = "、".join(features) if features else "一般房間"
         
-        content = {
-            "type": "box",
-            "layout": "horizontal",
-            "contents": [
-                {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": room_info['name'],
-                            "size": "md",
-                            "weight": "bold",
-                            "color": "#111111"
-                        },
-                        {
-                            "type": "text",
-                            "text": feature_text,
-                            "size": "sm",
-                            "color": "#666666"
-                        }
-                    ],
-                    "flex": 3
-                },
-                {
-                    "type": "button",
-                    "action": {
-                        "type": "postback",
-                        "label": "選擇",
-                        "data": f"action=select_room&room_id={room_id}&therapist_id={therapist_data['therapist_id']}&date={therapist_data['date']}&time={therapist_data['time']}"
-                    },
-                    "style": "primary",
-                    "height": "sm",
-                    "flex": 2,
-                    "margin": "sm"
-                }
-            ],
-            "spacing": "md",
-            "paddingAll": "md",
-            "cornerRadius": "md"
-        }
+#         content = {
+#             "type": "box",
+#             "layout": "horizontal",
+#             "contents": [
+#                 {
+#                     "type": "box",
+#                     "layout": "vertical",
+#                     "contents": [
+#                         {
+#                             "type": "text",
+#                             "text": room_info['name'],
+#                             "size": "md",
+#                             "weight": "bold",
+#                             "color": "#111111"
+#                         },
+#                         {
+#                             "type": "text",
+#                             "text": feature_text,
+#                             "size": "sm",
+#                             "color": "#666666"
+#                         }
+#                     ],
+#                     "flex": 3
+#                 },
+#                 {
+#                     "type": "button",
+#                     "action": {
+#                         "type": "postback",
+#                         "label": "選擇",
+#                         "data": f"action=select_room&room_id={room_id}&therapist_id={therapist_data['therapist_id']}&date={therapist_data['date']}&time={therapist_data['time']}"
+#                     },
+#                     "style": "primary",
+#                     "height": "sm",
+#                     "flex": 2,
+#                     "margin": "sm"
+#                 }
+#             ],
+#             "spacing": "md",
+#             "paddingAll": "md",
+#             "cornerRadius": "md"
+#         }
         
-        contents.append(content)
+#         contents.append(content)
     
-    # 如果有多個房間，加入分隔線
-    if len(available_rooms) > 1:
-        new_contents = []
-        for i, content in enumerate(contents):
-            new_contents.append(content)
-            if i < len(contents) - 1:
-                new_contents.append({
-                    "type": "separator",
-                    "margin": "md"
-                })
-        contents = new_contents
+#     # 如果有多個房間，加入分隔線
+#     if len(available_rooms) > 1:
+#         new_contents = []
+#         for i, content in enumerate(contents):
+#             new_contents.append(content)
+#             if i < len(contents) - 1:
+#                 new_contents.append({
+#                     "type": "separator",
+#                     "margin": "md"
+#                 })
+#         contents = new_contents
     
-    flex_message = FlexSendMessage(
-        alt_text="選擇治療室",
-        contents={
-            "type": "bubble",
-            "header": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": "選擇治療室",
-                        "weight": "bold",
-                        "size": "lg",
-                        "color": "#ffffff"
-                    },
-                    {
-                        "type": "text",
-                        "text": "請選擇您偏好的治療室",
-                        "size": "sm",
-                        "color": "#ffffff",
-                        "margin": "sm"
-                    }
-                ],
-                "backgroundColor": "#27ACB2",
-                "paddingAll": "md"
-            },
-            "body": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": contents,
-                "spacing": "none",
-                "paddingAll": "md"
-            },
-            "footer": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": "粉紅色系房間無監視器，提供更佳隱私",
-                        "size": "xs",
-                        "color": "#888888",
-                        "align": "center"
-                    }
-                ],
-                "paddingAll": "sm"
-            }
-        }
-    )
+#     flex_message = FlexSendMessage(
+#         alt_text="選擇治療室",
+#         contents={
+#             "type": "bubble",
+#             "header": {
+#                 "type": "box",
+#                 "layout": "vertical",
+#                 "contents": [
+#                     {
+#                         "type": "text",
+#                         "text": "選擇治療室",
+#                         "weight": "bold",
+#                         "size": "lg",
+#                         "color": "#ffffff"
+#                     },
+#                     {
+#                         "type": "text",
+#                         "text": "請選擇您偏好的治療室",
+#                         "size": "sm",
+#                         "color": "#ffffff",
+#                         "margin": "sm"
+#                     }
+#                 ],
+#                 "backgroundColor": "#27ACB2",
+#                 "paddingAll": "md"
+#             },
+#             "body": {
+#                 "type": "box",
+#                 "layout": "vertical",
+#                 "contents": contents,
+#                 "spacing": "none",
+#                 "paddingAll": "md"
+#             },
+#             "footer": {
+#                 "type": "box",
+#                 "layout": "vertical",
+#                 "contents": [
+#                     {
+#                         "type": "text",
+#                         "text": "粉紅色系房間無監視器，提供更佳隱私",
+#                         "size": "xs",
+#                         "color": "#888888",
+#                         "align": "center"
+#                     }
+#                 ],
+#                 "paddingAll": "sm"
+#             }
+#         }
+#     )
     
-    logger.info("房間選擇 Flex Message 建立成功")
-    return flex_message
+#     logger.info("房間選擇 Flex Message 建立成功")
+#     return flex_message
 
 def get_available_rooms(date_str, time_str):
     """獲取指定日期時間的可用房間"""
@@ -2867,11 +3040,20 @@ def handle_final_appointment_confirmation(user_id, user_message, appointment_dat
         if len(parts) >= 2:
             name = parts[0]
             phone = parts[1]
-            notes = ' '.join(parts[2:]) if len(parts) > 2 else ''
+            additional_notes = ' '.join(parts[2:]) if len(parts) > 2 else ''
             
             # 電話號碼驗證
             if not re.match(r'^09\d{8}$', phone) and not re.match(r'^0\d{1,2}-?\d{6,8}$', phone):
                 return TextSendMessage(text="請提供正確的電話號碼格式（例如：0912345678）")
+            
+            # 合併備註：用戶症狀備註 + 額外備註
+            symptoms_notes = user_states[user_id].get('appointment_notes', '')
+            combined_notes = []
+            if symptoms_notes:
+                combined_notes.append(symptoms_notes)
+            if additional_notes:
+                combined_notes.append(additional_notes)
+            final_notes = ' / '.join(combined_notes)
             
             # 儲存預約
             final_appointment_data = {
@@ -2882,7 +3064,7 @@ def handle_final_appointment_confirmation(user_id, user_message, appointment_dat
                 'room_id': appointment_data['room_id'],
                 'date': appointment_data['date'],
                 'time': appointment_data['time'],
-                'notes': notes,
+                'notes': final_notes,  # 修改：使用合併後的備註
                 'created_by': 'admin' if is_admin_mode else 'patient'
             }
             
@@ -2892,6 +3074,9 @@ def handle_final_appointment_confirmation(user_id, user_message, appointment_dat
                 # 重置用戶狀態
                 user_states[user_id]['stage'] = 'chat'
                 user_states[user_id]['admin_mode'] = False
+                # 清除備註
+                if 'appointment_notes' in user_states[user_id]:
+                    del user_states[user_id]['appointment_notes']
                 
                 # 建立確認訊息
                 flex_message = create_appointment_confirmation_flex(final_appointment_data, appointment_id)
@@ -3052,7 +3237,7 @@ def handle_admin_room_selection(user_id, message):
         'date': date_str,
         'time': time_str
     }
-    user_states[user_id]['stage'] = 'appointment_confirm'
+    user_states[user_id]['stage'] = 'admin_appointment_notes'  # 修改：先進入備註階段
     
     # 顯示確認資訊
     therapist_info = THERAPISTS[therapist_id]
@@ -3068,9 +3253,35 @@ def handle_admin_room_selection(user_id, message):
            f"治療師：{therapist_info['name']}\n" \
            f"房間：{room_info['name']}\n" \
            f"費用：{therapist_info['fee']}元\n\n" \
+           f"請輸入病患症狀或備註：\n" \
+           f"（例如：腰痛、肩膀僵硬、產後復健等，如無特殊症狀請輸入「無」）")
+
+def handle_admin_appointment_notes(user_id, user_message):
+    """處理管理員預約備註"""
+    # 儲存備註
+    user_states[user_id]['appointment_notes'] = user_message if user_message != '無' else ''
+    user_states[user_id]['stage'] = 'appointment_confirm'
+    
+    # 顯示完整預約資訊
+    appointment_data = user_states[user_id]['final_appointment_data']
+    therapist_info = THERAPISTS[appointment_data['therapist_id']]
+    room_info = TREATMENT_ROOMS[appointment_data['room_id']]
+    
+    date_obj = datetime.strptime(appointment_data['date'], '%Y-%m-%d')
+    formatted_date = date_obj.strftime('%m月%d日')
+    weekday = ['週一', '週二', '週三', '週四', '週五', '週六', '週日'][date_obj.weekday()]
+    
+    notes_text = f"\n備註：{user_message}" if user_message != '無' else ""
+    
+    return TextSendMessage(text=f"管理員預約確認：\n\n" \
+           f"日期：{formatted_date}({weekday})\n" \
+           f"時間：{appointment_data['time']}\n" \
+           f"治療師：{therapist_info['name']}\n" \
+           f"房間：{room_info['name']}\n" \
+           f"費用：{therapist_info['fee']}元{notes_text}\n\n" \
            f"請輸入病患資料以完成預約：\n" \
-           f"格式：姓名 電話 [備註]\n" \
-           f"例如：王小明 0912345678 腰痛治療")
+           f"格式：姓名 電話 [額外備註]\n" \
+           f"例如：王小明 0912345678 初診")
 
 def handle_flex_cancellation(user_id, appointment_id):
     """處理Flex Message取消預約"""
@@ -3128,76 +3339,83 @@ def handle_postback(event):
         action = params.get('action')
         
         if action == 'select_therapist':
-            # 處理治療師選擇
+            # 處理治療師選擇 - 直接進入確認階段，不選房間
             therapist_id = params.get('therapist_id')
             date = params.get('date')
             time = params.get('time')
             
-            therapist_data = {
-                'therapist_id': therapist_id,
-                'date': date,
-                'time': time
-            }
+            # 自動分配可用房間
+            available_rooms = get_available_rooms(date, time)
+            if not available_rooms:
+                reply_message = TextSendMessage(text="很抱歉，該時段沒有可用房間，請選擇其他時間。")
+            else:
+                # 自動選擇第一個可用房間
+                selected_room = available_rooms[0]
+                
+                # 組合最終預約資料
+                therapist_info = THERAPISTS[therapist_id]
+                room_info = TREATMENT_ROOMS[selected_room]
+                
+                user_states[user_id]['final_appointment_data'] = {
+                    'therapist_id': therapist_id,
+                    'room_id': selected_room,
+                    'date': date,
+                    'time': time
+                }
+                user_states[user_id]['stage'] = 'appointment_notes'  # 修改：先進入備註階段
+                
+                date_obj = datetime.strptime(date, '%Y-%m-%d')
+                formatted_date = date_obj.strftime('%m月%d日')
+                weekday = ['週一', '週二', '週三', '週四', '週五', '週六', '週日'][date_obj.weekday()]
+                
+                reply_message = TextSendMessage(text=f"您的預約資訊：\n\n" \
+                       f"日期：{formatted_date}({weekday})\n" \
+                       f"時間：{time}\n" \
+                       f"治療師：{therapist_info['name']}\n" \
+                       f"房間：{room_info['name']}\n" \
+                       f"費用：{therapist_info['fee']}元\n\n" \
+                       f"請問您有什麼症狀或特別需要注意的地方嗎？\n" \
+                       f"（可以簡單描述，例如：腰痛、肩膀僵硬等，如果沒有特別症狀請輸入「無」）")
             
-            user_states[user_id]['selected_therapist_data'] = therapist_data
-            user_states[user_id]['stage'] = 'select_room'
-            
-            # 顯示房間選擇
-            flex_message = create_room_selection_flex(therapist_data)
-            reply_message = flex_message if flex_message else TextSendMessage(text="正在為您安排房間...")
-            
-        elif action == 'select_preferred_slot':
-            # 處理基於偏好的時段選擇 - 新增這個處理
+        elif action == 'direct_confirm':
+            # 處理直接確認（新增的動作）
             therapist_id = params.get('therapist_id')
             date = params.get('date')
             time = params.get('time')
             
-            # 獲取可用房間並進入房間選擇
-            therapist_data = {
-                'therapist_id': therapist_id,
-                'date': date,
-                'time': time
-            }
+            # 自動分配可用房間
+            available_rooms = get_available_rooms(date, time)
+            if not available_rooms:
+                reply_message = TextSendMessage(text="很抱歉，該時段沒有可用房間，請選擇其他時間。")
+            else:
+                # 自動選擇第一個可用房間
+                selected_room = available_rooms[0]
+                
+                # 組合最終預約資料
+                therapist_info = THERAPISTS[therapist_id]
+                room_info = TREATMENT_ROOMS[selected_room]
+                
+                user_states[user_id]['final_appointment_data'] = {
+                    'therapist_id': therapist_id,
+                    'room_id': selected_room,
+                    'date': date,
+                    'time': time
+                }
+                user_states[user_id]['stage'] = 'appointment_notes'  # 修改：先進入備註階段
+                
+                date_obj = datetime.strptime(date, '%Y-%m-%d')
+                formatted_date = date_obj.strftime('%m月%d日')
+                weekday = ['週一', '週二', '週三', '週四', '週五', '週六', '週日'][date_obj.weekday()]
+                
+                reply_message = TextSendMessage(text=f"您的預約資訊：\n\n" \
+                       f"日期：{formatted_date}({weekday})\n" \
+                       f"時間：{time}\n" \
+                       f"治療師：{therapist_info['name']}\n" \
+                       f"房間：{room_info['name']}\n" \
+                       f"費用：{therapist_info['fee']}元\n\n" \
+                       f"請問您有什麼症狀或特別需要注意的地方嗎？\n" \
+                       f"（可以簡單描述，例如：腰痛、肩膀僵硬等，如果沒有特別症狀請輸入「無」）")
             
-            user_states[user_id]['selected_therapist_data'] = therapist_data
-            user_states[user_id]['stage'] = 'select_room'
-            
-            flex_message = create_room_selection_flex(therapist_data)
-            reply_message = flex_message if flex_message else TextSendMessage(text="正在為您安排房間...")
-            
-        elif action == 'select_room':
-            # 處理房間選擇，進入最終確認
-            room_id = params.get('room_id')
-            therapist_id = params.get('therapist_id')
-            date = params.get('date')
-            time = params.get('time')
-            
-            # 組合最終預約資料
-            therapist_info = THERAPISTS[therapist_id]
-            room_info = TREATMENT_ROOMS[room_id]
-            
-            user_states[user_id]['final_appointment_data'] = {
-                'therapist_id': therapist_id,
-                'room_id': room_id,
-                'date': date,
-                'time': time
-            }
-            user_states[user_id]['stage'] = 'appointment_confirm'
-            
-            date_obj = datetime.strptime(date, '%Y-%m-%d')
-            formatted_date = date_obj.strftime('%m月%d日')
-            weekday = ['週一', '週二', '週三', '週四', '週五', '週六', '週日'][date_obj.weekday()]
-            
-            reply_message = TextSendMessage(text=f"您的預約資訊：\n\n" \
-                   f"日期：{formatted_date}({weekday})\n" \
-                   f"時間：{time}\n" \
-                   f"治療師：{therapist_info['name']}\n" \
-                   f"房間：{room_info['name']}\n" \
-                   f"費用：{therapist_info['fee']}元\n\n" \
-                   f"請提供您的姓名和聯絡電話以完成預約。\n" \
-                   f"格式：姓名 電話\n" \
-                   f"例如：王小明 0912345678")
-        
         elif action == 'cancel' or action == 'admin_cancel':
             # 處理取消預約
             appointment_id = int(params.get('appointment_id', 0))
